@@ -6,13 +6,52 @@ import global_variables as gv
 from calibration_operations import CalibrationOperations
 from read_and_save_file import ReadAndSaveFile
 import json 
+import tkinter as tk
+from PIL import Image, ImageTk
 
-# Made for the purpose of mapping weighted points from 
-# The Board to determine a calibration factor
-# This will equalize the game accross all participants 
+global ursina_initialized
+ursina_initialized = False
+
+def show_splash_screen():
+    global root, ursina_initialized
+    root = tk.Tk()
+    root.overrideredirect(True)
+    width = root.winfo_screenwidth()
+    height = root.winfo_screenheight()
+    print(width, height)
+    root.geometry("%dx%d" % (width, height))
+    root.configure(bg='white')
+    #root.eval('tk::PlaceWindow . center')
+    root.attributes('-topmost', True)
+    image = Image.open("Logo.png")
+    photo = ImageTk.PhotoImage(image)
+
+    # Calculate the center coordinates for the image
+    image_width = photo.width()
+    image_height = photo.height()
+    center_x = (width - image_width) // 2
+    center_y = (height - image_height) // 2
+
+    # Create a label with the image and place it in the center
+    label = tk.Label(root, image=photo, highlightthickness=0, borderwidth=0)
+    label.place(x=center_x, y=center_y)
+
+    def check_ursina_initialized():
+        if ursina_initialized:
+            root.destroy()
+        else:
+            root.after(100, check_ursina_initialized)
+
+    root.after(100, check_ursina_initialized)
+    root.mainloop()
+
+# Show splash screen
+splash_thread = threading.Thread(target=show_splash_screen)
+splash_thread.start()
+
 class CalibrationUI(Entity): 
-    
-    def __init__(self, serial_reader: SerialReader, **kwargs): 
+
+    def __init__(self, **kwargs): 
         """
         This function will initialize the calibration UI.
 
@@ -30,8 +69,10 @@ class CalibrationUI(Entity):
         self.bottom_left = 2
         self.bottom_right = 3
         self.box_size = 0.5
-        self.box_color = color.gray
+        self.box_color = '6e6e6e'
+        self.box_border_color = color.gray #'565656'
         self.radius_from_center = 4
+        self.border_radius = 4
         self.index = 0
         self.objective_index = 0
         self.sampling_rate = 60 # Hz
@@ -46,13 +87,14 @@ class CalibrationUI(Entity):
         self._build_objectives()
         self.player = self._build_player()
         
-        # Open a thread to blink the current objective 
-        self.blink_thread = threading.Thread(target=self._blink_objective)
-        self.blink_thread.start()
-
+        # Start blinking the current objective
+        self.blinking = False
+        self.blink_sequence = self._create_blink_sequence()
+        self.blink_sequence.start()
+        
         super().__init__()
 
-    def update(self): 
+    def update(self):
         """
         This function will be called every frame.
         
@@ -62,7 +104,7 @@ class CalibrationUI(Entity):
         # This is a temporary fix
         if self.calibrated:
             return
-  
+
         if self.objective_index > len(self.order_of_boxes) - 1: 
             self.destroy()
             return 
@@ -73,7 +115,7 @@ class CalibrationUI(Entity):
         if self.debug:
             self.currentRow = self._grab_row_development_enviornment(); 
         else:
-            self.currentRow = self.serial_reader.decode_incoming_game_data()
+            self.currentRow = self._grab_dummy_data()
             if self.currentRow == None:
                 return
             else: 
@@ -89,13 +131,13 @@ class CalibrationUI(Entity):
             time.sleep(1/self.sampling_rate)
 
     def _build_objectives(self): 
-        self.box_right = self._build_single_objective(self.radius_from_center,0)
-        self.box_left = self._build_single_objective(-self.radius_from_center,0)
-        self.box_bottom = self._build_single_objective(0,-self.radius_from_center)
-        self.box_top = self._build_single_objective(0,self.radius_from_center)
+        self.box_right = self._build_single_objective(self.border_radius,0, 0.5, 5.25)
+        self.box_left = self._build_single_objective(-self.border_radius,0, 0.5, 5.25)
+        self.box_bottom = self._build_single_objective(0,-self.border_radius, 5.25, 0.5)
+        self.box_top = self._build_single_objective(0,self.border_radius, 5.25, 0.5)
         self.order_of_boxes = [self.box_left, self.box_right, self.box_top, self.box_bottom]
 
-    def _build_single_objective(self,pos_x,pos_y): 
+    def _build_single_objective(self, pos_x, pos_y, scaleX, scaleY):
         """
         This function will build a single objective box.
 
@@ -111,27 +153,32 @@ class CalibrationUI(Entity):
         Entity
             The objective box
         """
-        return Entity(model='quad',color=self.box_color,scale=(self.box_size, self.box_size), position=(pos_x, pos_y), collider='box')
+        objective = Entity(model='quad', color=self.box_color, scale=(scaleX, scaleY), position=(pos_x, pos_y), collider='box', always_on_top=True)
+        border = Entity(model='quad', color=self.box_border_color, scale=(scaleX+0.25, scaleY+0.25), position=(pos_x, pos_y), collider=None)
+        return objective
     
-    def _blink_objective(self):
-        """
-        This function will blink the current objective box.
-        """
-        while self.objective_index <= 3:
-            time.sleep(0.5)
-            self.order_of_boxes[self.objective_index].color = color.red
-            time.sleep(0.5)
-            self.order_of_boxes[self.objective_index].color = self.box_color
+    def _create_blink_sequence(self):
+        def blink():
+            if self.objective_index > len(self.order_of_boxes) - 1:
+                return
+            current_box = self.order_of_boxes[self.objective_index]
+            current_box.color = color.red if self.blinking else self.box_color
+            self.blinking = not self.blinking
+
+        blink_sequence = Sequence(Func(blink), Wait(0.5), loop=True)
+        return blink_sequence
 
     def _build_player(self):
-        return Entity(model='sphere', color=color.white, scale=(0.05, 0.05, 0.05), position=(0, 0, 0), collider='box')
+        return Entity(model='sphere', color=color.white, scale=(0.2, 0.2, 0.2), position=(0, 0, 0), collider='box', highlight_color=color.green, always_on_top=True)
     
     def _grab_row_development_enviornment(self): 
         currentRow = self.df.iloc[self.index]
         self.index+=1 
         return currentRow
+
+    def _grab_dummy_data(self):
+        return [0, 0, 0, 0]
         
-    
     def _has_collided(self):
         # If current_box cannot be indexed, destroy the game
         current_box = self.order_of_boxes[self.objective_index]
@@ -145,7 +192,7 @@ class CalibrationUI(Entity):
 
     def _increment_objective_index(self):
         self.objective_index += 1
-    
+
     def _get_movement_vector_2d(self): 
         """
         This function will return the movement vector of the player
@@ -201,9 +248,31 @@ def read_data(path):
     return df
 
 if __name__ == '__main__':
-
-    serial_reader = SerialReader(port=gv.serial_port_id, baudrate=gv.serial_port_baudrate)
+    ursina_initialized = False
+    # Start Ursina Loading
     app = Ursina()
-    # df = read_data('balance_data/example_raw/game_data_left.csv')
+    serial_reader = SerialReader(port=gv.serial_port_id, baudrate=gv.serial_port_baudrate)
+    #df = read_data('balance_data/example_raw/game_data_left.csv')
     calibrationUI = CalibrationUI(serial_reader)
+    window.color = color.black
+    window.fullscreen = True
+
+    #Adjust camera settings
+    camera.orthographic = True
+    camera.fov = 10
+
+    game_area = Entity(model='quad', color=color.gray, scale=(7.5, 7.5), position=(0, 0, 0.05))
+    frame = Entity(model='quad', color='3a3a3a', scale=(9.5, 9.5), position=(0, 0, 0.1), texture='white_cube')
+
+    # Temporary arrow key controls to move player
+    # def update():
+    #     if held_keys['left arrow']:
+    #         calibrationUI.player.x -= 0.1
+    #     if held_keys['right arrow']:
+    #         calibrationUI.player.x += 0.1
+    #     if held_keys['up arrow']:
+    #         calibrationUI.player.y += 0.1
+    #     if held_keys['down arrow']:
+    #         calibrationUI.player.y -= 0.1
+    ursina_initialized = True
     app.run()
